@@ -3,8 +3,10 @@ external sorting for csv file with customized comparator and support to sort wit
 
 ## Learning purpose
 here is a project for you to learn how to do external sorting. the knowledge of it u can view here. https://15445.courses.cs.cmu.edu/fall2019/slides/10-sorting.pdf
+
 You can clone this project, and read the code architecture.
 The Entrance class is `ExternalSort.java`; the core method is `sortCsv(...)`; 
+
 To achieve this algorithm, there are two step. 
 
 * first, you need split one large file to a lot of sorted small file which used this `BatchSortedFileProducer.java`
