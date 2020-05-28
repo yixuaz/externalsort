@@ -1,0 +1,117 @@
+    private static File sortSingleTmpFile(List<CSVRecord> tmpList, Comparator<CSVRecord> cmp,
+                                          File tmpFolderPath, boolean isDistinct, CSVFormat csvFormat,
+                                          IStreamWrapper wrapper) throws IOException {
+        Collections.sort(tmpList, cmp);
+        File tmpFile = File.createTempFile("sortInBatch", "flatfile", tmpFolderPath);
+        CSVRecord lastLine = null;
+        try (CSVPrinter printer = new CSVPrinter(new BufferedWriter(
+                new OutputStreamWriter(wrapper.wrap(new FileOutputStream(tmpFile)))), csvFormat)) {
+            for (CSVRecord csvRecord : tmpList) {
+                if (csvRecord == null) {
+                    throw new IllegalStateException("INVALID AREA");
+                }
+                if (isDistinct && (lastLine != null && cmp.compare(csvRecord, lastLine) == 0)) {
+                    LOG.warn("skip one line because key is not distinct {}", csvRecord.toString());
+                } else {
+                    printer.printRecord(csvRecord);
+                    lastLine = csvRecord;
+                }
+            }
+
+            return tmpFile;
+        }
+    }
+
+    public static List<File> sortCsvInBatch(File csvFile, Comparator<CSVRecord> cmp, File tmpDirectory, Charset cs,
+                                                boolean isDistinct, CSVFormat csvFormat, int excludeHeaderLines,
+                                                IStreamWrapper wrapper) throws IOException {
+
+        List<File> files = new ArrayList<File>();
+        long blockSize = estimateBestSizeOfBlocks(estimateAvailableMemory());
+
+        AtomicLong currentBlock = new AtomicLong(0);
+        List<CSVRecord> tmpList = new ArrayList<CSVRecord>();
+        AtomicInteger cnt = new AtomicInteger(0);;
+        try (CSVParser parser = new CSVParser(new BufferedReader(
+                new InputStreamReader(wrapper.wrap(new FileInputStream(csvFile)), cs)),
+                CSVFormat.DEFAULT)) {
+            parser.spliterator().forEachRemaining(e -> {
+                cnt.getAndIncrement();
+                if (currentBlock.get() < blockSize) {
+                    if (e.getRecordNumber() <= excludeHeaderLines) {
+                        // pass the header line
+                        LOG.info("skip one header line because key is not distinct {}", e.toString());
+                    } else {
+                        tmpList.add(e);
+                        currentBlock.addAndGet(SizeCalculator.estimatedSizeOf(e));
+                    }
+                } else {
+                    try {
+                        tmpList.add(e);
+                        files.add(sortSingleTmpFile(tmpList, cmp, tmpDirectory, isDistinct, csvFormat, wrapper));
+                    } catch (Exception e1) {
+                        LOG.warn("Error during the sort in batch", e1);
+                    }
+                    tmpList.clear();
+                    currentBlock.getAndSet(0);
+                }
+
+            });
+        }
+        if (!tmpList.isEmpty()) {
+            files.add(sortSingleTmpFile(tmpList, cmp, tmpDirectory, isDistinct, csvFormat, wrapper));
+        }
+        LOG.info("list file size {}", files.size());
+        return files;
+
+    }
+
+
+    private static long mergeSortedFiles(List<CsvFilelineStack> csvList, BufferedWriter bufferedWriter,
+                                             Comparator<CSVRecord> cmp, boolean isDinstinct, CSVFormat csvFormat)
+                throws IOException {
+        PriorityQueue<CsvFilelineStack> pq = new PriorityQueue<>(
+                new Comparator<CsvFilelineStack>() {
+                    @Override
+                    public int compare(CsvFilelineStack i, CsvFilelineStack j) {
+                        return cmp.compare(i.peek(), j.peek());
+                    }
+                });
+        for (CsvFilelineStack csvFilelineStack : csvList) {
+            if (!csvFilelineStack.empty()) {
+                pq.add(csvFilelineStack);
+            }
+        }
+        long rowCnt = 0;
+        CSVPrinter printer = new CSVPrinter(bufferedWriter, csvFormat);
+        CSVRecord lastLine = null;
+        try {
+            while (!pq.isEmpty()) {
+                CsvFilelineStack csvFileLines = pq.poll();
+                CSVRecord curLine = csvFileLines.pop();
+                if (curLine == null) {
+                    throw new IllegalStateException("INVALID AREA");
+                }
+                if (isDinstinct && (lastLine != null && cmp.compare(curLine, lastLine) == 0)) {
+                    LOG.warn("skip one line because key is not distinct {}", curLine.toString());
+                } else {
+                    printer.printRecord(curLine);
+                    lastLine = curLine;
+                    rowCnt++;
+                }
+                if (csvFileLines.empty()) {
+                    csvFileLines.close();
+                } else {
+                    // add it back
+                    pq.offer(csvFileLines);
+                }
+            }
+        } finally {
+            printer.close();
+            bufferedWriter.close();
+            for (CsvFilelineStack bfb : pq) {
+                bfb.close();
+            }
+        }
+        return rowCnt;
+    }
